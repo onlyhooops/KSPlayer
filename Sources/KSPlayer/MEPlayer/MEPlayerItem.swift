@@ -640,12 +640,30 @@ extension MEPlayerItem: MediaPlayback {
                 let value = Unmanaged<AbstractAVIOContext>.fromOpaque(opaque).takeRetainedValue()
                 value.close()
             }
-            // 不要自己来释放pb。不然第二次播放同一个url会出问题
-//            self.formatCtx?.pointee.pb = nil
+            // NasVio fork (2026-11-14): AVFMT_FLAG_CUSTOM_IO 下 avformat_close_input
+            // 不会释放 formatCtx.pb（上游注释亦承认），于是每次装载泄漏一个
+            // av_malloc(bufferSize) 缓冲 + 一个 AVIOContext 结构体。
+            // 与 NasVio/Media/FFmpegThumbnailProvider.swift 的 close() 同构：
+            // 先在关闭容器**之前**保存 pb 指针，关闭之后再释放 buffer 与结构体。
+            // opaque 持有的 AbstractAVIOContext 已由上面的 takeRetainedValue() 平衡，
+            // 这里只处理 C 层内存，不重复释放对象；也不在关闭前把 pb 置 nil
+            // （上游注释担心的「第二次播放同一 url 出问题」正是那种写法）。
+            let customIO = self.formatCtx.flatMap { ctx -> UnsafeMutablePointer<AVIOContext>? in
+                (ctx.pointee.flags & AVFMT_FLAG_CUSTOM_IO) != 0 ? ctx.pointee.pb : nil
+            }
             self.formatCtx?.pointee.interrupt_callback.opaque = nil
             self.formatCtx?.pointee.interrupt_callback.callback = nil
             avformat_close_input(&self.formatCtx)
             avformat_close_input(&self.outputFormatCtx)
+            if let pb = customIO {
+                // avio_context_free 只释放结构体本身，buffer 必须由调用方 av_free。
+                if let buffer = pb.pointee.buffer {
+                    av_free(buffer)
+                    pb.pointee.buffer = nil
+                }
+                var ioContext: UnsafeMutablePointer<AVIOContext>? = pb
+                avio_context_free(&ioContext)
+            }
             self.duration = 0
             self.closeOperation = nil
             self.operationQueue.cancelAllOperations()

@@ -238,6 +238,12 @@ open class KSPlayerLayer: NSObject {
     }
 
     deinit {
+        // NasVio fork (2026-11-14): KSPlayerLayer 的 10 Hz timer 由 run loop 强持有，
+        // 上游从未 invalidate —— 每次 unload() → load() 都会泄漏一个 timer，
+        // 图层析构后仍以 10 Hz 唤醒主线程（真机 Instruments 可观察到 timer 数单调增长）。
+        // timer 是 lazy var：即使本图层从未触发过它，这里也只是「创建后立即失效」，
+        // 不会在 run loop 上留下任何东西。
+        timer.invalidate()
         if #available(iOS 15.0, tvOS 15.0, macOS 12.0, *) {
             player.pipController?.contentSource = nil
         }
